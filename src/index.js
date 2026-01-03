@@ -1,6 +1,5 @@
 // ============================================================
-// 🛡️ PREMIUM LOADER v5.0.0 - MAXIMUM SECURITY EDITION
-// Complete & Ready to Deploy
+// 🛡️ PREMIUM LOADER v5.2.0 - WHITELIST PRIORITY FIX
 // ============================================================
 
 const express = require('express');
@@ -105,18 +104,13 @@ app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.set('trust proxy', 1);
 
-// Rate Limiting
 const limiter = rateLimit({
-    windowMs: config.RATE_LIMIT.WINDOW_MS,
-    max: config.RATE_LIMIT.MAX_REQUESTS,
+    windowMs: 60 * 1000,
+    max: 60,
     message: { success: false, error: "Too many requests" },
     keyGenerator: (req) => getClientIP(req),
     standardHeaders: true,
-    legacyHeaders: false,
-    handler: (req, res) => {
-        logAccess(req, 'RATE_LIMITED', false);
-        res.status(429).json({ success: false, error: "Rate limit exceeded" });
-    }
+    legacyHeaders: false
 });
 
 app.use('/api/', limiter);
@@ -183,9 +177,7 @@ function isBrowser(req) {
                              userAgent.includes('firefox') ||
                              userAgent.includes('edge');
         
-        const hasAcceptLanguage = !!req.headers['accept-language'];
-        
-        if (hasBrowserUA && hasAcceptLanguage) {
+        if (hasBrowserUA && !!req.headers['accept-language']) {
             return true;
         }
     }
@@ -216,7 +208,7 @@ function isDeviceBlocked(req) {
 }
 
 // ============================================================
-// 🚀 MAIN ENDPOINT - /script
+// 🚀 MAIN ENDPOINT - /script (WHITELIST PRIORITY FIX)
 // ============================================================
 
 app.get('/script', async (req, res) => {
@@ -225,18 +217,41 @@ app.get('/script', async (req, res) => {
         return res.status(403).type('text/html').send(UNAUTHORIZED_HTML);
     }
 
-    const blockInfo = isDeviceBlocked(req);
-    if (blockInfo.blocked) {
-        logAccess(req, 'BLOCKED_DEVICE_ATTEMPT', false, { reason: blockInfo.reason });
-        
-        const blockedScript = `
+    // WHITELIST CHECK FIRST (BEFORE BAN CHECK)
+    const playerIdHeader = getPlayerID(req);
+    const whitelistEnv = process.env.WHITELIST_USER_IDS || '';
+    const whitelistUserIds = whitelistEnv
+        .split(',')
+        .map(id => id.trim())
+        .filter(id => id !== '');
+    
+    console.log(`📋 [WHITELIST CHECK]`);
+    console.log(`   Whitelist IDs: ${whitelistUserIds.join(', ') || 'NONE'}`);
+    console.log(`   Player ID from request: ${playerIdHeader || 'NOT PROVIDED'}`);
+    
+    let isWhitelisted = false;
+    if (playerIdHeader && whitelistUserIds.includes(playerIdHeader)) {
+        isWhitelisted = true;
+        console.log(`✅ [WHITELISTED] Player ID ${playerIdHeader} is in whitelist!`);
+    }
+
+    // Only check ban if NOT whitelisted
+    if (!isWhitelisted) {
+        const blockInfo = isDeviceBlocked(req);
+        if (blockInfo.blocked) {
+            logAccess(req, 'BLOCKED_DEVICE_ATTEMPT', false, { reason: blockInfo.reason });
+            
+            const blockedScript = `
 game:GetService("Players").LocalPlayer:Kick("⛔ You have been permanently banned.\\n\\nReason: ${blockInfo.reason}\\n\\nBan ID: ${blockInfo.banId || 'N/A'}")
 `;
-        return res.type('text/plain').send(blockedScript);
+            return res.type('text/plain').send(blockedScript);
+        }
+    } else {
+        console.log(`🔓 [BYPASS] Skipping ban check for whitelisted user`);
     }
 
     try {
-        console.log(`📥 [SCRIPT] Request from: ${getClientIP(req)} | HWID: ${getHWID(req) || 'N/A'}`);
+        console.log(`📥 [SCRIPT] Request from: ${getClientIP(req)}`);
         
         const sessionToken = generateSessionToken();
         const timestamp = Date.now();
@@ -251,10 +266,10 @@ game:GetService("Players").LocalPlayer:Kick("⛔ You have been permanently banne
                 const configErrorScript = `
 game:GetService("StarterGui"):SetCore("SendNotification", {
     Title = "⚠️ Setup Required",
-    Text = "Server belum dikonfigurasi. Hubungi admin.",
+    Text = "Server not configured. Contact admin.",
     Duration = 10
 })
-warn("[LOADER] SCRIPT_SOURCE_URL belum di-set di environment variables!")
+warn("[LOADER] SCRIPT_SOURCE_URL not set in environment variables!")
 `;
                 return res.status(200).type('text/plain').send(configErrorScript);
             }
@@ -288,7 +303,7 @@ warn("[LOADER] SCRIPT_SOURCE_URL belum di-set di environment variables!")
                 const fetchErrorScript = `
 game:GetService("StarterGui"):SetCore("SendNotification", {
     Title = "⚠️ Connection Error",
-    Text = "Gagal mengambil script. Coba lagi.",
+    Text = "Failed to fetch script. Try again.",
     Duration = 5
 })
 warn("[LOADER] Fetch error: ${fetchError.message.replace(/"/g, '\\"')}")
@@ -304,13 +319,6 @@ warn("[LOADER] Fetch error: ${fetchError.message.replace(/"/g, '\\"')}")
         
         const banEndpoint = `${serverUrl}/api/ban`;
         
-        // Get whitelisted user IDs from environment variable
-        const whitelistEnv = process.env.WHITELIST_USER_IDS || '';
-        const whitelistUserIds = whitelistEnv
-            .split(',')
-            .map(id => parseInt(id.trim()))
-            .filter(id => !isNaN(id));
-
         const protectedScript = generateProtectedScript(script, {
             sessionToken,
             timestamp,
@@ -318,13 +326,14 @@ warn("[LOADER] Fetch error: ${fetchError.message.replace(/"/g, '\\"')}")
             hwid: getHWID(req),
             playerId: getPlayerID(req),
             banEndpoint,
-            whitelistUserIds
+            whitelistUserIds: whitelistUserIds.map(id => parseInt(id)).filter(id => !isNaN(id))
         });
 
         logAccess(req, 'SCRIPT_SERVED', true, { 
             size: protectedScript.length,
             originalSize: script.length,
-            protected: true
+            protected: true,
+            whitelisted: isWhitelisted
         });
         
         res.status(200).type('text/plain').send(protectedScript);
@@ -336,7 +345,7 @@ warn("[LOADER] Fetch error: ${fetchError.message.replace(/"/g, '\\"')}")
         const errorScript = `
 game:GetService("StarterGui"):SetCore("SendNotification", {
     Title = "❌ Error",
-    Text = "Terjadi kesalahan. Coba lagi.",
+    Text = "An error occurred. Try again.",
     Duration = 5
 })
 warn("[LOADER] Error: ${error.message.replace(/"/g, '\\"')}")
@@ -379,7 +388,7 @@ app.post('/api/ban', (req, res) => {
             banId 
         });
         
-        console.log(`🔨 [BAN] Player: ${playerName} | Reason: ${reason} | Tools: ${toolsDetected?.join(', ')}`);
+        console.log(`🔨 [BAN] Player: ${playerName} | Reason: ${reason}`);
         
         res.json({ success: true, banId });
     } catch (error) {
@@ -400,7 +409,7 @@ app.get('/', (req, res) => {
     res.json({
         status: "online",
         name: "Premium Loader",
-        version: "5.0.0",
+        version: "5.2.0",
         protected: true,
         configured: !!config.SCRIPT_SOURCE_URL
     });
@@ -421,8 +430,7 @@ app.get('/api/health', (req, res) => {
         uptime: Math.floor(process.uptime()) + "s",
         cached: scriptCache.has('main_script'),
         configured: !!config.SCRIPT_SOURCE_URL,
-        blockedDevices: blockedDevices.count(),
-        version: "5.0.0"
+        blockedDevices: blockedDevices.count()
     });
 });
 
@@ -448,6 +456,13 @@ app.post('/api/admin/cache/clear', adminAuth, (req, res) => {
     res.json({ success: true, message: "Cache cleared" });
 });
 
+app.post('/api/admin/bans/clear', adminAuth, (req, res) => {
+    blockedDevices.clearAll();
+    console.log('🗑️ All bans cleared by admin');
+    logAccess(req, 'BANS_CLEARED', true);
+    res.json({ success: true, message: "All bans cleared" });
+});
+
 app.get('/api/admin/stats', adminAuth, (req, res) => {
     res.json({ 
         success: true, 
@@ -460,8 +475,7 @@ app.get('/api/admin/stats', adminAuth, (req, res) => {
             hasScript: scriptCache.has('main_script'),
             keys: scriptCache.keys()
         },
-        blockedDevices: blockedDevices.count(),
-        version: "5.0.0"
+        blockedDevices: blockedDevices.count()
     });
 });
 
@@ -528,18 +542,15 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, '0.0.0.0', () => {
     console.log('');
     console.log('╔══════════════════════════════════════════════════════════╗');
-    console.log('║      🛡️  PREMIUM LOADER v5.0.0 - MAXIMUM SECURITY       ║');
+    console.log('║      🛡️  PREMIUM LOADER v5.2.0 - RUNNING                ║');
     console.log('╠══════════════════════════════════════════════════════════╣');
     console.log(`║  🌐 Port: ${PORT}                                            ║`);
     console.log('║                                                          ║');
-    console.log('║  🔒 Protection: MAXIMUM (7 Layers)                       ║');
-    console.log('║     • XOR Encryption        ✅                           ║');
-    console.log('║     • Custom Base64         ✅                           ║');
-    console.log('║     • String Obfuscation    ✅                           ║');
-    console.log('║     • Random Chunks         ✅                           ║');
-    console.log('║     • Anti-Hook             ✅                           ║');
+    console.log('║  🔒 Protection: ENABLED                                   ║');
     console.log('║     • Tool Detection        ✅                           ║');
     console.log('║     • Auto-Ban System       ✅                           ║');
+    console.log('║     • Whitelist Priority    ✅                           ║');
+    console.log('║     • Browser Blocking      ✅                           ║');
     console.log('║                                                          ║');
     
     if (config.SCRIPT_SOURCE_URL) {
@@ -554,11 +565,16 @@ app.listen(PORT, '0.0.0.0', () => {
         console.log('║  ⚠️  ADMIN_KEY: Using default (change it!)               ║');
     }
     
+    const whitelistEnv = process.env.WHITELIST_USER_IDS || '';
+    const whitelistCount = whitelistEnv.split(',').filter(id => id.trim() !== '').length;
+    console.log(`║  👥 Whitelisted Users: ${whitelistCount}                                  ║`);
+    
     console.log('║                                                          ║');
     console.log('║  📡 Endpoints:                                           ║');
     console.log('║     GET  /script        - Main protected script          ║');
     console.log('║     GET  /health        - Health check                   ║');
     console.log('║     POST /api/ban       - Ban endpoint                   ║');
+    console.log('║     POST /api/admin/bans/clear - Clear all bans          ║');
     console.log('║                                                          ║');
     console.log('╚══════════════════════════════════════════════════════════╝');
     console.log('');
